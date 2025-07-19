@@ -17,7 +17,7 @@ module.exports.renderNewForm=(req, res) => {
 //   const { id } = req.params;
 //   const listing = await Listing.findById(id).populate({path:"reviews",populate:{path:"author"},}).populate("owner");
 //   res.render("listings/show.ejs", { listing });
-// };
+//s };
 module.exports.postListing=async (req, res,next) => {
   let responce=await geocodingClient.forwardGeocode({
   query: req.body.listing.location,
