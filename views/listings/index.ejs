@@ -1,0 +1,107 @@
+<% layout("layouts/boilerplate") %>
+
+<!-- Heading -->
+<!-- <h2 class="my-4 text-center">All Listings</h2> -->
+
+<!-- Container for Bootstrap layout -->
+ <style>
+  #filters {
+    display: flex;
+    flex-wrap: wrap;
+  }
+
+  .filter{
+    text-align: center;
+    margin-right: 2rem;
+    margin-top: 2rem;
+    opacity: 0.7;
+  }
+  .filter:hover{
+    opacity: 1;
+    cursor: pointer;
+  }
+
+ </style>
+<div id="filters">
+  <div class="filter">
+    <div><i class="fa-solid fa-fire"></i></div>
+    <p>Trending</p>
+  </div>
+  <div class="filter">
+    <div><i class="fa-solid fa-bed"></i></div>
+    <p>Rooms</p>
+  </div>
+  <div class="filter">
+    <div><i class="fa-solid fa-mountain-city"></i></div>
+    <p>Iconic Cities</p>
+  </div>
+  <div class="filter">
+    <div><i class="fa-solid fa-umbrella-beach"></i></div>
+    <p>Beach</p>
+  </div>
+  <div class="filter">
+    <div><i class="fa-solid fa-mountain"></i></div>
+    <p>Mountain</p>
+  </div>
+  <div class="filter">
+    <div><i class="fa-brands fa-fort-awesome"></i></div>
+    <p>Castles</p>
+  </div>
+  <div class="filter">
+    <div><i class="fa-solid fa-campground"></i></div>
+    <p>Camping</p>
+  </div>
+  <div class="filter">
+    <div><i class="fa-solid fa-tree"></i></div>
+    <p>Forest</p>
+  </div>
+  <div class="filter">
+    <div><i class="fa-solid fa-snowflake"></i></div>
+    <p>Snow</p>
+  </div>
+  <div class="filter">
+    <div><i class="fa-solid fa-wheat-awn"></i></div>
+    <p>Farms</p>
+  </div>
+  <div class="filter">
+    <div><i class="fa-solid fa-mountain-sun"></i></div>
+    <p>Sun-Rise</p>
+  </div>
+  <div class="filter">
+    <div><i class="fa-solid fa-cloud-sun-rain"></i></div>
+    <p>Rains</p>
+  </div>
+  
+</div>
+<div class="container">
+  <!-- Responsive row: 3 columns on large, 2 on medium, 1 on small -->
+  <div class="row row-cols-lg-3 row-cols-md-2 row-cols-1 g-4 mt-1">
+    <% for (let i = 1; i < allListings.length; i++) { %>
+      <div class="col">
+        <!-- Link to listing details -->
+        <a href="/listing/<%= allListings[i]._id %>" class="listing-link" style="text-decoration: none;">
+          <!-- Card -->
+          <div class="card h-100 listing-card">
+            <img 
+              src="<%= allListings[i].image.url %>" 
+              alt="listing_image"
+              class="card-img-top"
+              style="height: 20rem; object-fit: cover;"
+            />
+            <div class="card-img-overlay">travel</div>
+            <div class="card-body">
+              <p class="card-text">
+                <b><%= allListings[i].title %></b><br />
+                <%= allListings[i].price
+                  ? '₹ ' + allListings[i].price.toLocaleString('en-IN') + ' / night'
+                  : 'Price not available'
+                %>
+              </p>
+              
+            </div>
+          </div>
+        </a>
+      </div>
+    <% } %>
+  </div>
+</div>
