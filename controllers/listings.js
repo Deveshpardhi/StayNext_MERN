@@ -18,6 +18,7 @@ module.exports.renderNewForm=(req, res) => {
 //   const listing = await Listing.findById(id).populate({path:"reviews",populate:{path:"author"},}).populate("owner");
 //   res.render("listings/show.ejs", { listing });
 // };
+
 module.exports.postListing=async (req, res,next) => {
   let responce=await geocodingClient.forwardGeocode({
   query: req.body.listing.location,
@@ -48,6 +49,7 @@ module.exports.updateListing=async (req, res) => {
     await Listing.findByIdAndUpdate(id, req.body.listing);
     res.redirect(`/listings/${id}`);
   };
+
 module.exports.deleteListing=async (req, res) => {
     const { id } = req.params;
     await Listing.findByIdAndDelete(id);
