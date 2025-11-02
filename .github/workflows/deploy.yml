@@ -12,13 +12,14 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # --- checkout (fixed for 128 error) ---
+      # --- checkout with PAT to avoid 128 ---
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           lfs: false
           submodules: false
+          token: ${{ secrets.GH_PAT }}
 
       - name: Debug repo state
         run: |
@@ -27,13 +28,11 @@ jobs:
           git status || true
           ls -la
 
-      # --- node setup ---
       - name: Use Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      # --- bundle code ---
       - name: Prepare release bundle
         run: |
           rm -rf release
@@ -44,7 +43,6 @@ jobs:
           [ -f release/.env ] && rm release/.env || true
           tar -czf release.tgz -C release .
 
-      # --- upload bundle to EC2 ---
       - name: Upload to EC2 (SCP)
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -54,7 +52,6 @@ jobs:
           source: "release.tgz"
           target: "/home/ubuntu/app"
 
-      # --- deploy on EC2 ---
       - name: Deploy on EC2 (SSH)
         uses: appleboy/ssh-action@v1.1.0
         with:
@@ -66,14 +63,12 @@ jobs:
             APP_DIR=/home/ubuntu/app
             mkdir -p "$APP_DIR"
             cd "$APP_DIR"
-
-            # extract upload
             [ -f release.tgz ] && tar -xzf release.tgz && rm -f release.tgz
 
-            # install production deps
+            # install prod deps
             npm ci --omit=dev || npm i --omit=dev
 
-            # run on port 8080 for nginx
+            # run on port 8080 (nginx proxies 80 -> 8080)
             export PORT=8080
             ENTRY="app.js"
 
