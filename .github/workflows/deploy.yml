@@ -2,7 +2,7 @@ name: Deploy StayNext to EC2
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main ]
 
 permissions:
   contents: read
