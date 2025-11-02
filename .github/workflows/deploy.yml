@@ -9,36 +9,70 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Show repo tree (debug)
+        run: |
+          pwd
+          ls -la
+          echo "---- server dir ----"
+          [ -d server ] && ls -la server || echo "no server/"
+          echo "---- client dir ----"
+          [ -d client ] && ls -la client || echo "no client/"
 
       - name: Use Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      # Build client
-      - name: Build client
+      # Build React client only if it exists
+      - name: Install + Build client (if present)
+        if: ${{ hashFiles('client/package.json') != '' }}
         working-directory: client
         run: |
-          npm ci || npm install
+          npm ci || npm i
           npm run build
 
-      # Install server dependencies
-      - name: Install server deps
-        working-directory: server
-        run: npm ci || npm install
+      # Decide where the server is (server/ or repo root)
+      - name: Detect server directory
+        id: detect
+        run: |
+          if [ -f server/package.json ]; then
+            echo "SERVER_DIR=server" >> $GITHUB_ENV
+          else
+            echo "SERVER_DIR=." >> $GITHUB_ENV
+          fi
+          echo "Server dir is: ${GITHUB_ENV}"
 
-      # Prepare bundle (server + built client)
+      # Install server deps
+      - name: Install server deps
+        run: |
+          cd "$SERVER_DIR"
+          npm ci || npm i
+
+      # Prepare release bundle
       - name: Prepare release
         run: |
+          rm -rf release
           mkdir -p release
-          cp -r server/* release/
-          mkdir -p release/public
-          cp -r client/build/* release/public/
+          # copy server
+          if [ "$SERVER_DIR" = "server" ]; then
+            cp -r server/* release/
+          else
+            shopt -s dotglob
+            cp -r * release/
+          fi
+          # put built client (if present) into public/
+          if [ -d client/build ]; then
+            mkdir -p release/public
+            cp -r client/build/* release/public/
+          fi
+          # remove dev-only/CI files from bundle
+          rm -rf release/.git release/.github || true
           tar -czf release.tgz -C release .
 
-      - name: Upload bundle to EC2
+      - name: Upload to EC2 (SCP)
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -47,7 +81,7 @@ jobs:
           source: "release.tgz"
           target: "/home/ubuntu/app"
 
-      - name: Deploy on EC2
+      - name: Deploy on EC2 (SSH)
         uses: appleboy/ssh-action@v1.1.0
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -55,15 +89,30 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             set -e
-            cd /home/ubuntu/app
+            APP_DIR=/home/ubuntu/app
+            cd "$APP_DIR"
             tar -xzf release.tgz
-            rm release.tgz
-            npm ci --omit=dev || npm install --omit=dev
+            rm -f release.tgz
+
+            # install production deps in the extracted server root
+            # try server/ first; if not present, install in current dir
+            if [ -f server/package.json ]; then
+              cd server
+            fi
+            npm ci --omit=dev || npm i --omit=dev
+
+            # ensure app reads PORT from env (Nginx proxies 80 -> 8080)
             export PORT=8080
+
+            # pick an entry file
             ENTRY="server.js"
+            [ -f app.js ] && ENTRY="app.js"
+            [ -f index.js ] && ENTRY="index.js"
+
+            # start or reload with PM2
             if pm2 describe staynext >/dev/null 2>&1; then
               pm2 reload staynext --update-env
             else
-              pm2 start $ENTRY --name staynext
+              pm2 start "$ENTRY" --name staynext
             fi
             pm2 save
