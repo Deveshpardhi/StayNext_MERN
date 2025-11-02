@@ -1,8 +1,8 @@
-name: Deploy StayNext (root Node app) to EC2
+name: Deploy StayNext to EC2
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
 
 permissions:
   contents: read
@@ -12,24 +12,28 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      # --- checkout (fixed for 128 error) ---
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
           lfs: false
           submodules: false
 
+      - name: Debug repo state
+        run: |
+          git --version
+          git rev-parse --is-inside-work-tree || true
+          git status || true
+          ls -la
+
+      # --- node setup ---
       - name: Use Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      # (Optional) Install to run unit tests/build steps if you have any
-      # - name: Install deps (CI)
-      #   run: npm ci || npm i
-
-      # Bundle everything except git metadata & node_modules
-      # We also skip any .env in your repo so we don't overwrite the server's .env
+      # --- bundle code ---
       - name: Prepare release bundle
         run: |
           rm -rf release
@@ -40,7 +44,8 @@ jobs:
           [ -f release/.env ] && rm release/.env || true
           tar -czf release.tgz -C release .
 
-      - name: Upload bundle to EC2 (SCP)
+      # --- upload bundle to EC2 ---
+      - name: Upload to EC2 (SCP)
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -49,6 +54,7 @@ jobs:
           source: "release.tgz"
           target: "/home/ubuntu/app"
 
+      # --- deploy on EC2 ---
       - name: Deploy on EC2 (SSH)
         uses: appleboy/ssh-action@v1.1.0
         with:
@@ -61,18 +67,16 @@ jobs:
             mkdir -p "$APP_DIR"
             cd "$APP_DIR"
 
-            # Extract new release
+            # extract upload
             [ -f release.tgz ] && tar -xzf release.tgz && rm -f release.tgz
 
-            # Keep existing .env on server (we did not ship a .env)
-            # Install prod deps
+            # install production deps
             npm ci --omit=dev || npm i --omit=dev
 
-            # Ensure app listens on 8080 (Nginx proxies 80 -> 8080)
+            # run on port 8080 for nginx
             export PORT=8080
-
-            # Start/reload PM2 using your root entry file
             ENTRY="app.js"
+
             if pm2 describe staynext >/dev/null 2>&1; then
               pm2 reload staynext --update-env
             else
