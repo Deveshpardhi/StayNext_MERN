@@ -12,25 +12,34 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # --- MANUAL CLONE (bypass actions/checkout) ---
-      - name: Install git and clone repo with PAT
+      - name: Print context (debug)
+        run: |
+          echo "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME"
+          echo "GITHUB_REF=$GITHUB_REF"
+          echo "GITHUB_REF_NAME=$GITHUB_REF_NAME"
+          echo "Defaulting to branch auto-detect (main/master)."
+
+      # ---- MANUAL CLONE WITH PAT (bypasses checkout 128) ----
+      - name: Clone repo with PAT (no checkout)
         shell: bash
         run: |
-          sudo apt-get update -y
-          sudo apt-get install -y git
-          set -e
-          # Clone the exact repo/branch using your PAT
-          git clone --depth=1 https://${{ secrets.GH_PAT }}@github.com/Deveshpardhi/StayNext_MERN.git src
-          cd src
-          # Make sure we are on the expected branch
-          git fetch --depth=1 origin main || true
-          git fetch --depth=1 origin master || true
-          git checkout -qf ${GITHUB_REF_NAME}
+          set -euo pipefail
+          sudo apt-get update -y && sudo apt-get install -y git
+          REPO="Deveshpardhi/StayNext_MERN"
+          mkdir -p src && cd src
 
-      - name: Show repo tree
-        run: |
-          cd src
-          pwd
+          # pick branch: main if exists, else master
+          for BR in main master; do
+            if git ls-remote --heads https://${{ secrets.GH_PAT }}@github.com/$REPO.git $BR | grep -q refs/heads/$BR; then
+              TARGET="$BR"; break
+            fi
+          done
+          : "${TARGET:=main}"
+          echo "Using branch: $TARGET"
+
+          git clone --depth=1 --branch "$TARGET" https://${{ secrets.GH_PAT }}@github.com/$REPO.git .
+          echo "Cloned HEAD:"
+          git rev-parse HEAD
           ls -la
 
       - name: Use Node.js 20
@@ -38,8 +47,11 @@ jobs:
         with:
           node-version: 20
 
-      - name: Prepare release bundle (root Node app)
+      # ---- BUNDLE ROOT NODE APP (app.js) ----
+      - name: Build release bundle
+        shell: bash
         run: |
+          set -euo pipefail
           cd src
           rm -rf release
           mkdir -p release
@@ -48,8 +60,10 @@ jobs:
           rm -rf release/.git release/.github release/node_modules || true
           [ -f release/.env ] && rm release/.env || true
           tar -czf release.tgz -C release .
+          echo "Bundle created:"
+          ls -lh release.tgz
 
-      - name: Upload to EC2 (SCP)
+      - name: Upload bundle to EC2 (SCP)
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.EC2_HOST }}
@@ -65,18 +79,27 @@ jobs:
           username: ${{ secrets.EC2_USER }}
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            set -e
+            set -euo pipefail
             APP_DIR=/home/ubuntu/app
             mkdir -p "$APP_DIR"
             cd "$APP_DIR"
-            [ -f release.tgz ] && tar -xzf release.tgz && rm -f release.tgz
+
+            if [ ! -f release.tgz ]; then
+              echo "ERROR: release.tgz not found in $APP_DIR"; ls -la; exit 2
+            fi
+
+            tar -xzf release.tgz && rm -f release.tgz
+            [ -f package.json ] || { echo "ERROR: package.json missing after extract"; ls -la; exit 3; }
 
             # install prod deps
             npm ci --omit=dev || npm i --omit=dev
 
-            # run on port 8080 (nginx proxies 80 -> 8080)
+            # ensure port matches nginx (80 -> 8080)
             export PORT=8080
             ENTRY="app.js"
+            [ -f server.js ] && ENTRY="server.js"
+            [ -f index.js ] && ENTRY="index.js"
+            echo "Starting entry: $ENTRY on PORT=$PORT"
 
             if pm2 describe staynext >/dev/null 2>&1; then
               pm2 reload staynext --update-env
@@ -84,3 +107,7 @@ jobs:
               pm2 start "$ENTRY" --name staynext
             fi
             pm2 save
+
+      - name: Final check (prints)
+        run: |
+          echo "If previous steps are green, deployment finished."
