@@ -14,31 +14,21 @@ jobs:
     steps:
       - name: Print context (debug)
         run: |
-          echo "GITHUB_EVENT_NAME=$GITHUB_EVENT_NAME"
-          echo "GITHUB_REF=$GITHUB_REF"
           echo "GITHUB_REF_NAME=$GITHUB_REF_NAME"
-          echo "Defaulting to branch auto-detect (main/master)."
 
-      # ---- MANUAL CLONE WITH PAT (bypasses checkout 128) ----
-      - name: Clone repo with PAT (no checkout)
+      # If checkout still fails for you, keep the manual clone with PAT.
+      # This step requires repo secret GH_PAT (Fine-grained: Contents Read, or Classic: repo).
+      - name: Clone repo with PAT (bypass checkout 128)
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update -y && sudo apt-get install -y git
+          sudo apt-get update -y && sudo apt-get install -y git rsync
           REPO="Deveshpardhi/StayNext_MERN"
           mkdir -p src && cd src
-
-          # pick branch: main if exists, else master
-          for BR in main master; do
-            if git ls-remote --heads https://${{ secrets.GH_PAT }}@github.com/$REPO.git $BR | grep -q refs/heads/$BR; then
-              TARGET="$BR"; break
-            fi
-          done
-          : "${TARGET:=main}"
+          # pick branch: main if exists else master
+          TARGET="$(git ls-remote --heads https://${{ secrets.GH_PAT }}@github.com/$REPO.git main | grep -q refs/heads/main && echo main || echo master)"
           echo "Using branch: $TARGET"
-
           git clone --depth=1 --branch "$TARGET" https://${{ secrets.GH_PAT }}@github.com/$REPO.git .
-          echo "Cloned HEAD:"
           git rev-parse HEAD
           ls -la
 
@@ -47,20 +37,23 @@ jobs:
         with:
           node-version: 20
 
-      # ---- BUNDLE ROOT NODE APP (app.js) ----
-      - name: Build release bundle
+      # ---------- BUILD RELEASE BUNDLE (no recursion) ----------
+      - name: Build release bundle safely
         shell: bash
         run: |
           set -euo pipefail
           cd src
           rm -rf release
           mkdir -p release
-          shopt -s dotglob
-          cp -r * release/
-          rm -rf release/.git release/.github release/node_modules || true
-          [ -f release/.env ] && rm release/.env || true
+          # Use rsync to EXCLUDE .git, .github, node_modules, .env, and release itself
+          rsync -a ./ release/ \
+            --exclude ".git" \
+            --exclude ".github" \
+            --exclude "node_modules" \
+            --exclude ".env" \
+            --exclude "release"
+          # Create tarball from the release directory
           tar -czf release.tgz -C release .
-          echo "Bundle created:"
           ls -lh release.tgz
 
       - name: Upload bundle to EC2 (SCP)
@@ -84,17 +77,15 @@ jobs:
             mkdir -p "$APP_DIR"
             cd "$APP_DIR"
 
-            if [ ! -f release.tgz ]; then
-              echo "ERROR: release.tgz not found in $APP_DIR"; ls -la; exit 2
-            fi
-
+            # Make sure upload exists, then extract
+            [ -f release.tgz ] || { echo "ERROR: release.tgz not found"; ls -la; exit 2; }
             tar -xzf release.tgz && rm -f release.tgz
             [ -f package.json ] || { echo "ERROR: package.json missing after extract"; ls -la; exit 3; }
 
-            # install prod deps
+            # Install prod deps
             npm ci --omit=dev || npm i --omit=dev
 
-            # ensure port matches nginx (80 -> 8080)
+            # Run behind Nginx (which proxies 80 -> 8080)
             export PORT=8080
             ENTRY="app.js"
             [ -f server.js ] && ENTRY="server.js"
@@ -107,7 +98,3 @@ jobs:
               pm2 start "$ENTRY" --name staynext
             fi
             pm2 save
-
-      - name: Final check (prints)
-        run: |
-          echo "If previous steps are green, deployment finished."
