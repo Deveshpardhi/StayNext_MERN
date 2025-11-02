@@ -1,0 +1,69 @@
+name: Deploy StayNext MERN to EC2
+
+on:
+  push:
+    branches: [ main ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Build client
+      - name: Build client
+        working-directory: client
+        run: |
+          npm ci || npm install
+          npm run build
+
+      # Install server dependencies
+      - name: Install server deps
+        working-directory: server
+        run: npm ci || npm install
+
+      # Prepare bundle (server + built client)
+      - name: Prepare release
+        run: |
+          mkdir -p release
+          cp -r server/* release/
+          mkdir -p release/public
+          cp -r client/build/* release/public/
+          tar -czf release.tgz -C release .
+
+      - name: Upload bundle to EC2
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          source: "release.tgz"
+          target: "/home/ubuntu/app"
+
+      - name: Deploy on EC2
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            set -e
+            cd /home/ubuntu/app
+            tar -xzf release.tgz
+            rm release.tgz
+            npm ci --omit=dev || npm install --omit=dev
+            export PORT=8080
+            ENTRY="server.js"
+            if pm2 describe staynext >/dev/null 2>&1; then
+              pm2 reload staynext --update-env
+            else
+              pm2 start $ENTRY --name staynext
+            fi
+            pm2 save
