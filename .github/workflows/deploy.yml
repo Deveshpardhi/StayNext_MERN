@@ -17,31 +17,56 @@ jobs:
       NODE_VERSION: "20"
 
     steps:
-      # 1️⃣ Checkout the repository using your Personal Access Token
+      # 1️⃣ Checkout the repo using PAT
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           token: ${{ env.GH_PAT }}
 
-      # 2️⃣ Setup Node.js (to use npm and prepare build if needed)
+      # 2️⃣ Setup Node.js
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
 
-      # 3️⃣ Create deployment bundle (release.tgz)
-      - name: Create deploy artifact (release.tgz)
+      # 3️⃣ Safe build + create release.tgz (Option 2)
+      - name: Build (optional) and create deploy artifact from staging
         run: |
+          set -euo pipefail
+
+          # optional React client build
+          if [ -d client ]; then
+            echo "Building React client..."
+            pushd client
+            npm ci
+            npm run build
+            popd
+          fi
+
           TAR_NAME=release.tgz
           echo "TAR_NAME=$TAR_NAME" >> $GITHUB_ENV
-          tar --exclude-vcs \
-              --exclude='./.github' \
-              --exclude='node_modules' \
-              -czf "$TAR_NAME" .
-          ls -lah .
 
-      # 4️⃣ Upload bundle to EC2 server via SCP
+          # make a clean staging copy to avoid 'file changed as we read it'
+          STAGE=.deploy_stage
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+
+          echo "Copying files into staging..."
+          rsync -a \
+            --exclude '.git' \
+            --exclude '.github' \
+            --exclude 'node_modules' \
+            ./ "$STAGE/"
+
+          echo "Creating tarball..."
+          tar -czf "$TAR_NAME" -C "$STAGE" .
+          rm -rf "$STAGE"
+
+          echo "✅ Tarball created:"
+          ls -lah "$TAR_NAME"
+
+      # 4️⃣ Upload the bundle to EC2
       - name: Upload artifact to EC2
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -53,8 +78,8 @@ jobs:
           timeout: 60s
           command_timeout: 15m
 
-      # 5️⃣ Connect to EC2 and deploy the new release
-      - name: Deploy on EC2 (unpack → install → reload PM2)
+      # 5️⃣ Deploy on EC2 (unpack → install → reload → health)
+      - name: Deploy on EC2
         uses: appleboy/ssh-action@v1.1.0
         with:
           host: ${{ env.EC2_HOST }}
@@ -72,9 +97,9 @@ jobs:
             TS=$(date +%Y%m%d_%H%M%S)
             NEW_RELEASE=$RELEASES_DIR/$TS
 
-            echo "=== Checking if release bundle exists ==="
+            echo "=== Checking if tarball exists ==="
             if [ ! -f "$TAR" ]; then
-              echo "ERROR: $TAR not found on server!"
+              echo "ERROR: $TAR not found on EC2!"
               ls -lah /tmp
               exit 2
             fi
@@ -82,7 +107,7 @@ jobs:
             echo "=== Creating new release directory ==="
             mkdir -p "$RELEASES_DIR" "$SHARED_DIR" "$NEW_RELEASE"
 
-            echo "=== Extracting bundle ==="
+            echo "=== Extracting release ==="
             tar -xzf "$TAR" -C "$NEW_RELEASE"
             rm -f "$TAR"
 
@@ -97,25 +122,25 @@ jobs:
               npm install --omit=dev
             fi
 
-            echo "=== Switching current release symlink ==="
+            echo "=== Switching current symlink ==="
             ln -sfn "$NEW_RELEASE" "$CURRENT_LINK"
 
-            echo "=== Reloading PM2 ==="
+            echo "=== Restarting via PM2 ==="
             pm2 startOrReload "$SHARED_DIR/pm2/ecosystem.config.cjs" --env production
 
             echo "=== Health check ==="
             sleep 3
             if ! curl -fsS http://127.0.0.1:8080/health > /dev/null; then
-              echo "❌ Health check FAILED — rolling back..."
-              PREV_RELEASE=$(ls -1dt $RELEASES_DIR/* | sed -n '2p')
-              if [ -n "$PREV_RELEASE" ]; then
-                ln -sfn "$PREV_RELEASE" "$CURRENT_LINK"
+              echo "❌ Health check failed — rolling back"
+              PREV=$(ls -1dt $RELEASES_DIR/* | sed -n '2p')
+              if [ -n "$PREV" ]; then
+                ln -sfn "$PREV" "$CURRENT_LINK"
                 pm2 startOrReload "$SHARED_DIR/pm2/ecosystem.config.cjs" --env production
               fi
               exit 1
             fi
 
-            echo "=== Cleaning up old releases ==="
+            echo "=== Cleaning old releases ==="
             ls -1dt $RELEASES_DIR/* | tail -n +6 | xargs -r rm -rf
 
             pm2 save
