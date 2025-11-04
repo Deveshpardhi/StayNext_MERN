@@ -1,100 +1,122 @@
-name: Deploy StayNext to EC2
+name: Deploy MERN to EC2
 
 on:
   push:
-    branches: [ main ]
-
-permissions:
-  contents: read
+    branches: [ "main", "master" ]
+  workflow_dispatch: {}
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      APP_NAME: mern-app
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      EC2_USER: ${{ secrets.EC2_USER }}
+      SSH_KEY:  ${{ secrets.EC2_SSH_KEY }}
+      GH_PAT:   ${{ secrets.GH_PAT }}
+      NODE_VERSION: "20"
 
     steps:
-      - name: Print context (debug)
-        run: |
-          echo "GITHUB_REF_NAME=$GITHUB_REF_NAME"
+      # 1️⃣ Checkout the repository using your Personal Access Token
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ env.GH_PAT }}
 
-      # If checkout still fails for you, keep the manual clone with PAT.
-      # This step requires repo secret GH_PAT (Fine-grained: Contents Read, or Classic: repo).
-      - name: Clone repo with PAT (bypass checkout 128)
-        shell: bash
-        run: |
-          set -euo pipefail
-          sudo apt-get update -y && sudo apt-get install -y git rsync
-          REPO="Deveshpardhi/StayNext_MERN"
-          mkdir -p src && cd src
-          # pick branch: main if exists else master
-          TARGET="$(git ls-remote --heads https://${{ secrets.GH_PAT }}@github.com/$REPO.git main | grep -q refs/heads/main && echo main || echo master)"
-          echo "Using branch: $TARGET"
-          git clone --depth=1 --branch "$TARGET" https://${{ secrets.GH_PAT }}@github.com/$REPO.git .
-          git rev-parse HEAD
-          ls -la
-
-      - name: Use Node.js 20
+      # 2️⃣ Setup Node.js (to use npm and prepare build if needed)
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
 
-      # ---------- BUILD RELEASE BUNDLE (no recursion) ----------
-      - name: Build release bundle safely
-        shell: bash
+      # 3️⃣ Create deployment bundle (release.tgz)
+      - name: Create deploy artifact (release.tgz)
         run: |
-          set -euo pipefail
-          cd src
-          rm -rf release
-          mkdir -p release
-          # Use rsync to EXCLUDE .git, .github, node_modules, .env, and release itself
-          rsync -a ./ release/ \
-            --exclude ".git" \
-            --exclude ".github" \
-            --exclude "node_modules" \
-            --exclude ".env" \
-            --exclude "release"
-          # Create tarball from the release directory
-          tar -czf release.tgz -C release .
-          ls -lh release.tgz
+          TAR_NAME=release.tgz
+          echo "TAR_NAME=$TAR_NAME" >> $GITHUB_ENV
+          tar --exclude-vcs \
+              --exclude='./.github' \
+              --exclude='node_modules' \
+              -czf "$TAR_NAME" .
+          ls -lah .
 
-      - name: Upload bundle to EC2 (SCP)
+      # 4️⃣ Upload bundle to EC2 server via SCP
+      - name: Upload artifact to EC2
         uses: appleboy/scp-action@v0.1.7
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
-          source: "src/release.tgz"
-          target: "/home/ubuntu/app"
+          host: ${{ env.EC2_HOST }}
+          username: ${{ env.EC2_USER }}
+          key: ${{ env.SSH_KEY }}
+          source: ${{ env.TAR_NAME }}
+          target: /tmp/
+          timeout: 60s
+          command_timeout: 15m
 
-      - name: Deploy on EC2 (SSH)
+      # 5️⃣ Connect to EC2 and deploy the new release
+      - name: Deploy on EC2 (unpack → install → reload PM2)
         uses: appleboy/ssh-action@v1.1.0
         with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ${{ secrets.EC2_USER }}
-          key: ${{ secrets.EC2_SSH_KEY }}
+          host: ${{ env.EC2_HOST }}
+          username: ${{ env.EC2_USER }}
+          key: ${{ env.SSH_KEY }}
+          script_stop: true
           script: |
             set -euo pipefail
-            APP_DIR=/home/ubuntu/app
-            mkdir -p "$APP_DIR"
-            cd "$APP_DIR"
 
-            # Make sure upload exists, then extract
-            [ -f release.tgz ] || { echo "ERROR: release.tgz not found"; ls -la; exit 2; }
-            tar -xzf release.tgz && rm -f release.tgz
-            [ -f package.json ] || { echo "ERROR: package.json missing after extract"; ls -la; exit 3; }
+            APP_DIR=/var/www/${{ env.APP_NAME }}
+            RELEASES_DIR=$APP_DIR/releases
+            SHARED_DIR=$APP_DIR/shared
+            CURRENT_LINK=$APP_DIR/current
+            TAR=/tmp/release.tgz
+            TS=$(date +%Y%m%d_%H%M%S)
+            NEW_RELEASE=$RELEASES_DIR/$TS
 
-            # Install prod deps
-            npm ci --omit=dev || npm i --omit=dev
-
-            # Run behind Nginx (which proxies 80 -> 8080)
-            export PORT=8080
-            ENTRY="app.js"
-            [ -f server.js ] && ENTRY="server.js"
-            [ -f index.js ] && ENTRY="index.js"
-            echo "Starting entry: $ENTRY on PORT=$PORT"
-
-            if pm2 describe staynext >/dev/null 2>&1; then
-              pm2 reload staynext --update-env
-            else
-              pm2 start "$ENTRY" --name staynext
+            echo "=== Checking if release bundle exists ==="
+            if [ ! -f "$TAR" ]; then
+              echo "ERROR: $TAR not found on server!"
+              ls -lah /tmp
+              exit 2
             fi
+
+            echo "=== Creating new release directory ==="
+            mkdir -p "$RELEASES_DIR" "$SHARED_DIR" "$NEW_RELEASE"
+
+            echo "=== Extracting bundle ==="
+            tar -xzf "$TAR" -C "$NEW_RELEASE"
+            rm -f "$TAR"
+
+            echo "=== Linking shared .env ==="
+            ln -sf "$SHARED_DIR/.env" "$NEW_RELEASE/.env"
+
+            echo "=== Installing production dependencies ==="
+            cd "$NEW_RELEASE"
+            if [ -f package-lock.json ]; then
+              npm ci --omit=dev
+            else
+              npm install --omit=dev
+            fi
+
+            echo "=== Switching current release symlink ==="
+            ln -sfn "$NEW_RELEASE" "$CURRENT_LINK"
+
+            echo "=== Reloading PM2 ==="
+            pm2 startOrReload "$SHARED_DIR/pm2/ecosystem.config.cjs" --env production
+
+            echo "=== Health check ==="
+            sleep 3
+            if ! curl -fsS http://127.0.0.1:8080/health > /dev/null; then
+              echo "❌ Health check FAILED — rolling back..."
+              PREV_RELEASE=$(ls -1dt $RELEASES_DIR/* | sed -n '2p')
+              if [ -n "$PREV_RELEASE" ]; then
+                ln -sfn "$PREV_RELEASE" "$CURRENT_LINK"
+                pm2 startOrReload "$SHARED_DIR/pm2/ecosystem.config.cjs" --env production
+              fi
+              exit 1
+            fi
+
+            echo "=== Cleaning up old releases ==="
+            ls -1dt $RELEASES_DIR/* | tail -n +6 | xargs -r rm -rf
+
             pm2 save
+            echo "✅ Deployment complete!"
